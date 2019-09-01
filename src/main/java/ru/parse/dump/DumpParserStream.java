@@ -11,19 +11,20 @@ import java.util.Objects;
 
 /**
  * A stream parsing the PHD file.
+ * For more info read <a href="https://www.ibm.com/support/knowledgecenter/en/SSYKE2_8.0.0/com.ibm.java.vm.80.doc/docs/heapdump_phd_format.html">PHD specification</a>
  */
 public class DumpParserStream implements Closeable {
     private static final int BUFFER_SIZE = 64 * 1024 * 1024;
     private static final int BYTES_CACHE_SIZE = 1024;
-    private static final Logger LOGGER = LoggerFactory.getLogger(DumpParserStream.class);
+//    private static final Logger LOGGER = LoggerFactory.getLogger(DumpParserStream.class);
 
     private InputStream stream;
     private byte[] bytesCache = new byte[BYTES_CACHE_SIZE];
 
     private long bytesReadTotal = 0;
 
-    private static final long READ_TOTAL_LOG_INTERVAL = 100 * 1024 * 1024;
-    private long logReadTotalAfter = READ_TOTAL_LOG_INTERVAL;
+//    private static final long READ_TOTAL_LOG_INTERVAL = 100 * 1024 * 1024;
+//    private long logReadTotalAfter = READ_TOTAL_LOG_INTERVAL;
 
     /**
      * Create a stream from common {@link InputStream}.
@@ -46,17 +47,28 @@ public class DumpParserStream implements Closeable {
     }
 
     /**
-     *
      * Parse the PHD stream.
      * Because usually PHD files are too large to contain in memory, parsed objects are contained in the index system.
      *
      * @param virtualIndexSystem
+     * @param listener
      * @return
      * @throws IOException
      */
-    public DumpParsingStatistics readObjects(VirtualIndexSystem virtualIndexSystem) throws IOException {
+    public DumpParsingStatistics readObjects(VirtualIndexSystem virtualIndexSystem, DumpParserListener listener) throws IOException {
         DumpHeader header = readHeader();
-        return readBody(header, virtualIndexSystem);
+        if (listener != null) {
+            listener.onHeaderReceive(bytesReadTotal, header);
+        }
+
+        return readBody(header, virtualIndexSystem, listener);
+    }
+
+    @Override
+    public void close() throws IOException {
+        if (stream != null) {
+            stream.close();
+        }
     }
 
     /**
@@ -104,7 +116,7 @@ public class DumpParserStream implements Closeable {
             }
         }
 
-        LOGGER.info("Total bytes read in header {}", bytesReadTotal - bytesReadBefore);
+//        LOGGER.info("Total bytes read in header {}", bytesReadTotal - bytesReadBefore);
 
         return new DumpHeader(version, platform, hashed, j9VM, jvmVersion);
     }
@@ -114,13 +126,17 @@ public class DumpParserStream implements Closeable {
      *
      * @param header
      * @param virtualIndexSystem
+     * @param listener
      * @throws IOException
      */
-    DumpParsingStatistics readBody(DumpHeader header, VirtualIndexSystem virtualIndexSystem) throws IOException {
+    DumpParsingStatistics readBody(DumpHeader header, VirtualIndexSystem virtualIndexSystem, DumpParserListener listener) throws IOException {
         int startTag = readUnsignedByte();
         if (startTag != 2) {
             throw new IllegalStateException("Body has an invalid format");
         }
+
+        final long readTotalLogInterval = 100 * 1024 * 1024;
+        long logReadTotalAfter = readTotalLogInterval;
 
         long totalClassesParsed = 0;
         long totalObjectsParsed = 0;
@@ -164,21 +180,28 @@ public class DumpParserStream implements Closeable {
                 virtualIndexSystem.save(objectArray.getAddress(), objectArray);
                 ++totalObjectArraysParsed;
             } else if (recordTag == 3) {
-                LOGGER.info("Exited the body. {} bytes read", bytesReadTotal);
+//                LOGGER.info("Exited the body. {} bytes read", bytesReadTotal);
                 break;
             } else {
                 throw new IllegalStateException(String.format("Body has an invalid format. %d bytes read", bytesReadTotal));
             }
+
+            if (bytesReadTotal > logReadTotalAfter) {
+                logReadTotalAfter += readTotalLogInterval;
+
+                if (listener != null) {
+                    listener.onDataPortionReceive(bytesReadTotal, new DumpParsingStatistics(header, totalClassesParsed,
+                            totalObjectsParsed, totalObjectArraysParsed, totalPrimitiveArraysParsed));
+                }
+            }
         }
 
-        return new DumpParsingStatistics(header, totalClassesParsed, totalObjectsParsed, totalObjectArraysParsed, totalPrimitiveArraysParsed);
-    }
-
-    @Override
-    public void close() throws IOException {
-        if (stream != null) {
-            stream.close();
+        DumpParsingStatistics result = new DumpParsingStatistics(header, totalClassesParsed, totalObjectsParsed, totalObjectArraysParsed, totalPrimitiveArraysParsed);
+        if (listener != null) {
+            listener.onDataPortionReceive(bytesReadTotal, result);
         }
+
+        return result;
     }
 
     int readUnsignedByte() throws IOException {
@@ -202,10 +225,10 @@ public class DumpParserStream implements Closeable {
 
     long readUnsignedInt() throws IOException {
         readBytes(4);
-        return (0xff & bytesCache[0]) << 24 |
-                (0xff & bytesCache[1]) << 16 |
-                (0xff & bytesCache[2]) << 8 |
-                (0xff & bytesCache[3]);
+        return (0xffL & bytesCache[0]) << 24 |
+                (0xffL & bytesCache[1]) << 16 |
+                (0xffL & bytesCache[2]) << 8 |
+                (0xffL & bytesCache[3]);
     }
 
     int readSignedInt() throws IOException {
@@ -310,7 +333,6 @@ public class DumpParserStream implements Closeable {
     }
 
 
-
     private void readBytes(int bytesCount) throws IOException {
         readBytes(0, bytesCount);
     }
@@ -328,10 +350,10 @@ public class DumpParserStream implements Closeable {
     private void updateReadBytesCount(int read) {
         bytesReadTotal += read;
 
-        if (bytesReadTotal >= logReadTotalAfter) {
-            LOGGER.info("Bytes read {}", bytesReadTotal);
-            logReadTotalAfter += READ_TOTAL_LOG_INTERVAL;
-        }
+//        if (bytesReadTotal >= logReadTotalAfter) {
+//            LOGGER.info("Bytes read {}", bytesReadTotal);
+//            logReadTotalAfter += READ_TOTAL_LOG_INTERVAL;
+//        }
     }
 
     private void ensureBytesCacheSize(int length) {
